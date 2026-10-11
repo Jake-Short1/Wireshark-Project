@@ -1,9 +1,12 @@
-Network Security and Defense Wireshark  Fall Project 2026
+Wireshark Student Upgrade
 ---------------------------------------------------------
-Project Idea: 
+This is a patch to Wireshark v3.2.3 for Fall 2026 Network Security and Defense at RPI. Our project looks to improve Wireshark's packet information 
+section with a better GUI and copy buttons for a quicker improvement for our labs. 
+ 
+For the class, it wouldn't be required to use our version, however we would want to improve on the student experience to make labs quicker to complete
+and to understand, with explanations on what the packets are doing in our own packet information tab. 
 
-
-
+Project by Ben LaPorto, Jake Short, James Tarantino
 
 General Information
 -------------------
