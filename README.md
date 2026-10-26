@@ -1,5 +1,5 @@
-Wireshark Student Upgrade
----------------------------------------------------------
+# Wireshark Student Upgrade
+
 This is a patch to Wireshark v3.2.3 for Fall 2026 Network Security and Defense at RPI. Our project looks to improve Wireshark's packet information 
 section with a better GUI and copy buttons for a quicker improvement for our labs. 
  
@@ -7,6 +7,10 @@ For the class, it wouldn't be required to use our version, however we would want
 and to understand, with explanations on what the packets are doing in our own packet information tab. 
 
 Project by Ben LaPorto, Jake Short, James Tarantino, Raagav Kuraganti
+
+## Modified files:
+- example.c : example
+- example.c : example
 
 General Information
 -------------------
