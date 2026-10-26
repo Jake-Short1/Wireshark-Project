@@ -6,7 +6,7 @@ section with a better GUI and copy buttons for a quicker improvement for our lab
 For the class, it wouldn't be required to use our version, however we would want to improve on the student experience to make labs quicker to complete
 and to understand, with explanations on what the packets are doing in our own packet information tab. 
 
-Project by Ben LaPorto, Jake Short, James Tarantino
+Project by Ben LaPorto, Jake Short, James Tarantino, Raagav Kuraganti
 
 General Information
 -------------------
