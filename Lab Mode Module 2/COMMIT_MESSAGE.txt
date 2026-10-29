@@ -1,0 +1,19 @@
+Add Lab Mode Module 2: Field Copy panel
+
+Add a "Lab Fields (Copy)" dock to Wireshark v3.2.3, on top of Module 1
+(Lab selector toolbar). When a packet is selected, the dock lists the
+values students need for the SEED lab scripts, each with a Copy button:
+MAC/IP addresses, ports, raw TCP sequence/ack numbers, TCP flags,
+ICMP type/code/redirect gateway, ARP sender/target, DNS ID and query name.
+
+Folder contents:
+- module2.diff: the patch (git diff against the Module 1 base commit)
+- base/module1.diff: Module 1 patch that Module 2 requires
+- src/ui/qt/: field_copy_panel.h/.cpp (new), main_window.cpp, CMakeLists.txt
+- demo/lab_demo.pcap, screenshots/, README.md, MODULE2_NOTES.md
+
+Built and tested on Ubuntu 20.04 (gcc 9.4, Qt 5.12.8, C++11):
+0 compiler warnings, 149 added C/C++ lines (cap 150), patch applies
+cleanly to v3.2.3 + module1.diff.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
