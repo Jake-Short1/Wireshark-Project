@@ -1,0 +1,21 @@
+Add Lab Mode Module 3: lab styling (packet colors and columns)
+
+When a lab is chosen in the Lab toolbar (Module 1), color the packets
+that matter for that lab (e.g. forged TCP resets, poisoned ARP replies,
+ICMP redirects, DNS responses) and add a few columns with the values
+the lab needs (raw TCP seq/ack, ARP sender MAC/IP, DNS ID, ...).
+Choosing Off or another lab removes the previous styling. Lab columns
+are kept in memory only and are never written to the user's preferences.
+
+Folder contents:
+- module3.diff: the patch (git diff against the Module 1 base commit)
+- base/module1.diff: Module 1 patch that Module 3 requires
+- src/ui/qt/: lab_style.h/.cpp (new), main_window.cpp, CMakeLists.txt
+- demo/lab_demo.pcap, screenshots/, README.md, MODULE3_NOTES.md
+
+Built and tested on Ubuntu 20.04 (gcc 9.4, Qt 5.12.8, C++11):
+0 compiler warnings, 136 added C/C++ lines (target 110-140, cap 150).
+The patch applies cleanly to v3.2.3 + module1.diff, with or without
+module2.diff.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
