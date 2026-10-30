@@ -1,0 +1,255 @@
+diff --git a/ui/qt/CMakeLists.txt b/ui/qt/CMakeLists.txt
+index 20f4680..6b3f5ad 100644
+--- a/ui/qt/CMakeLists.txt
++++ b/ui/qt/CMakeLists.txt
+@@ -166,6 +166,7 @@ set(WIRESHARK_QT_HEADERS
+ 	interface_toolbar_reader.h
+ 	interface_frame.h
+ 	io_graph_dialog.h
++	lab_toolbar.h
+ 	layout_preferences_frame.h
+ 	lbm_lbtrm_transport_dialog.h
+ 	lbm_lbtru_transport_dialog.h
+@@ -386,6 +387,7 @@ set(WIRESHARK_QT_SRC
+ 	interface_frame.cpp
+ 	interface_toolbar.cpp
+ 	interface_toolbar_reader.cpp
++	lab_toolbar.cpp
+ 	layout_preferences_frame.cpp
+ 	lbm_lbtrm_transport_dialog.cpp
+ 	lbm_lbtru_transport_dialog.cpp
+diff --git a/ui/qt/lab_profiles.h b/ui/qt/lab_profiles.h
+new file mode 100755
+index 0000000..172863d
+--- /dev/null
++++ b/ui/qt/lab_profiles.h
+@@ -0,0 +1,50 @@
++/* lab_profiles.h - Lab Mode: the course labs and their preset display filters.
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#ifndef LAB_PROFILES_H
++#define LAB_PROFILES_H
++
++enum LabId { LAB_OFF = 0, LAB_TCP, LAB_ARP, LAB_ICMP, LAB_DNS, LAB_TUNNEL, LAB_COUNT };
++
++struct LabPreset  { const char *label; const char *filter; const char *tip; };
++struct LabProfile {
++    LabId        id;
++    const char  *title;        // text shown in the combo box
++    const char  *hint;         // "what to look for"; combo tooltip, later shown by Module 4
++    const char  *base_filter;  // applied when the lab is chosen ("" for LAB_OFF)
++    int          n_presets;
++    LabPreset    presets[5];
++};
++
++// Indexed by LabId. Every filter was checked with dftest from Wireshark 3.2.3.
++static const LabProfile lab_profiles[LAB_COUNT] = {
++    { LAB_OFF, "Off (normal Wireshark)", "Lab Mode is off. Wireshark works as usual.", "", 0, {} },
++    { LAB_TCP, "TCP (reset / hijack)", "Look for SYN, SYN-ACK and RST flags and the raw sequence numbers.", "tcp", 5, {
++        { "SYN only", "tcp.flags.syn == 1 && tcp.flags.ack == 0", "First packet of each new connection." },
++        { "SYN-ACK", "tcp.flags.syn == 1 && tcp.flags.ack == 1", "Server replies that accept a new connection." },
++        { "RST packets", "tcp.flags.reset == 1", "Resets that abort a connection, including forged ones." },
++        { "Telnet (port 23)", "tcp.port == 23", "Telnet sessions, which carry keystrokes in plain text." },
++        { "Retransmissions", "tcp.analysis.retransmission", "Segments sent again, often after a hijack or reset." } } },
++    { LAB_ARP, "ARP (cache poisoning / MITM)", "Watch for ARP replies that map a known IP address to a new MAC address.", "arp", 3, {
++        { "Requests", "arp.opcode == 1", "Broadcast questions: who has this IP address?" },
++        { "Replies", "arp.opcode == 2", "Answers that map an IP address to a MAC address." },
++        { "Duplicate address", "arp.duplicate-address-detected", "Two MAC addresses claim the same IP address." } } },
++    { LAB_ICMP, "ICMP (redirect)", "Look for Redirect messages (type 5) and check which gateway they announce.", "icmp", 4, {
++        { "Echo request", "icmp.type == 8", "Ping requests." },
++        { "Echo reply", "icmp.type == 0", "Ping replies." },
++        { "Redirect", "icmp.type == 5", "Messages telling a host to use a different gateway." },
++        { "Unreachable", "icmp.type == 3", "Errors saying a network, host or port cannot be reached." } } },
++    { LAB_DNS, "DNS (local / remote)", "Match responses to queries by transaction ID and port, and watch for forged NS records.", "dns", 4, {
++        { "Queries", "dns.flags.response == 0", "Questions sent to a DNS server." },
++        { "Responses", "dns.flags.response == 1", "Answers from a DNS server, real or spoofed." },
++        { "NS records", "dns.resp.type == 2", "Records naming the server responsible for a domain." },
++        { "Errors", "dns.flags.rcode != 0", "Responses with an error code, such as NXDOMAIN." } } },
++    { LAB_TUNNEL, "Tunnel / VPN", "Tunnelled traffic is encrypted, so compare the outer hosts and ports with the firewall rules.", "ssh || tls || udp", 4, {
++        { "SSH", "ssh", "SSH sessions, including SSH tunnels." },
++        { "TLS", "tls", "TLS-encrypted traffic, used by many VPNs." },
++        { "ICMP", "icmp", "Pings, for example to test whether a tunnel works." },
++        { "UDP", "udp", "UDP traffic, which carries most VPN tunnels." } } },
++};
++
++#endif // LAB_PROFILES_H
+diff --git a/ui/qt/lab_toolbar.cpp b/ui/qt/lab_toolbar.cpp
+new file mode 100755
+index 0000000..8216746
+--- /dev/null
++++ b/ui/qt/lab_toolbar.cpp
+@@ -0,0 +1,49 @@
++/* lab_toolbar.cpp - Lab Mode toolbar (see lab_toolbar.h).
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#include "lab_toolbar.h"
++
++#include <QAction>
++#include <QApplication>
++#include <QLabel>
++
++LabToolBar::LabToolBar(QWidget *parent) :
++    QToolBar(parent)
++{
++    addWidget(new QLabel(tr("Lab:")));
++
++    // One entry per lab in LabId order, so the combo index is the LabId.
++    lab_combo_ = new QComboBox(this);
++    for (int i = 0; i < LAB_COUNT; i++) {
++        lab_combo_->addItem(lab_profiles[i].title);
++        lab_combo_->setItemData(i, lab_profiles[i].hint, Qt::ToolTipRole);
++    }
++    addWidget(lab_combo_);
++
++    // activated() fires only for user picks (so startup keeps the filter); SIGNAL() avoids QOverload (C++14).
++    connect(lab_combo_, SIGNAL(activated(int)), this, SLOT(labActivated(int)));
++}
++
++void LabToolBar::labActivated(int index)
++{
++    const LabProfile &lab = lab_profiles[index];
++
++    // Delete the previous lab's buttons; deleting a QAction also removes it from the toolbar.
++    qDeleteAll(preset_actions_);
++    preset_actions_.clear();
++
++    for (int i = 0; i < lab.n_presets; i++) {
++        const LabPreset &preset = lab.presets[i];
++        QAction *action = addAction(preset.label);
++        action->setToolTip(QString("%1\n%2").arg(preset.tip, tr("Shift+click to edit before applying.")));
++        // The lambda copies the preset. Shift+click only prepares the filter, as in Wireshark's filter buttons.
++        connect(action, &QAction::triggered, this, [this, preset]() {
++            emit filterRequested(preset.filter, QApplication::keyboardModifiers() & Qt::ShiftModifier);
++        });
++        preset_actions_ << action;
++    }
++
++    emit filterRequested(lab.base_filter, false);  // "" for LAB_OFF clears the filter
++    emit labChanged(lab.id);
++}
+diff --git a/ui/qt/lab_toolbar.h b/ui/qt/lab_toolbar.h
+new file mode 100755
+index 0000000..bc0fc03
+--- /dev/null
++++ b/ui/qt/lab_toolbar.h
+@@ -0,0 +1,33 @@
++/* lab_toolbar.h - Lab Mode toolbar: pick a course lab, then apply its preset display filters.
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#ifndef LAB_TOOLBAR_H
++#define LAB_TOOLBAR_H
++
++#include "lab_profiles.h"
++
++#include <QComboBox>
++#include <QList>
++#include <QToolBar>
++
++class LabToolBar : public QToolBar
++{
++    Q_OBJECT
++public:
++    explicit LabToolBar(QWidget *parent = 0);
++    LabId currentLab() const { return static_cast<LabId>(lab_combo_->currentIndex()); }
++
++signals:
++    void labChanged(int lab_id);              // emitted on every lab selection, including LAB_OFF
++    void filterRequested(QString filter, bool prepare_only);  // "" means "clear the display filter"
++
++private slots:
++    void labActivated(int index);
++
++private:
++    QComboBox *lab_combo_;
++    QList<QAction *> preset_actions_;  // the current lab's preset buttons
++};
++
++#endif // LAB_TOOLBAR_H
+diff --git a/ui/qt/main_window.cpp b/ui/qt/main_window.cpp
+index adc3af3..48198d4 100644
+--- a/ui/qt/main_window.cpp
++++ b/ui/qt/main_window.cpp
+@@ -401,6 +401,14 @@ MainWindow::MainWindow(QWidget *parent) :
+ 
+     main_ui_->displayFilterToolBar->addWidget(filter_expression_toolbar_);
+ 
++    lab_toolbar_ = new LabToolBar(this);
++    lab_toolbar_->setMovable(false);
++    addToolBar(Qt::TopToolBarArea, lab_toolbar_);
++    insertToolBarBreak(lab_toolbar_);  // own row, below the display filter toolbar
++    connect(lab_toolbar_, SIGNAL(filterRequested(QString,bool)), this, SLOT(onLabFilterRequested(QString,bool)));
++    // Lab Mode integration point: teammates connect to lab_toolbar_ here, e.g.
++    // connect(lab_toolbar_, &LabToolBar::labChanged, <their object>, &<Class>::<slot>);
++
+ #if defined(HAVE_LIBNL) && defined(HAVE_NL80211)
+     connect(wireless_frame_, SIGNAL(showWirelessPreferences(QString)),
+             this, SLOT(showPreferencesDialog(QString)));
+diff --git a/ui/qt/main_window.h b/ui/qt/main_window.h
+index 8082b83..64f57a3 100644
+--- a/ui/qt/main_window.h
++++ b/ui/qt/main_window.h
+@@ -74,6 +74,7 @@
+ #include <ui/qt/widgets/display_filter_combo.h>
+ #include "filter_action.h"
+ #include "follow_stream_dialog.h"
++#include "lab_toolbar.h"
+ #include <ui/qt/models/pref_models.h>
+ 
+ class AccordionFrame;
+@@ -203,6 +204,7 @@ private:
+     QMap<QAction *, ts_type> td_actions;
+     QMap<QAction *, ts_precision> tp_actions;
+     FilterExpressionToolBar *filter_expression_toolbar_;
++    LabToolBar *lab_toolbar_;
+     bool was_maximized_;
+ 
+     /* the following values are maintained so that the capture file name and status
+@@ -405,6 +407,7 @@ private slots:
+     void onFilterSelected(QString, bool);
+     void onFilterPreferences();
+     void onFilterEdit(int uatIndex);
++    void onLabFilterRequested(QString filter, bool prepare);
+ 
+     // Handle FilterAction signals
+     void queuedFilterAction(QString filter, FilterAction::Action action, FilterAction::ActionType type);
+diff --git a/ui/qt/main_window_slots.cpp b/ui/qt/main_window_slots.cpp
+index c03f60a..de1ed72 100644
+--- a/ui/qt/main_window_slots.cpp
++++ b/ui/qt/main_window_slots.cpp
+@@ -327,6 +327,7 @@ void MainWindow::layoutToolbars()
+ 
+     main_ui_->mainToolBar->setVisible(recent.main_toolbar_show);
+     main_ui_->displayFilterToolBar->setVisible(recent.filter_toolbar_show);
++    lab_toolbar_->setVisible(recent.filter_toolbar_show);  // Lab Mode follows the filter toolbar
+ #if defined(HAVE_LIBNL) && defined(HAVE_NL80211)
+     main_ui_->wirelessToolBar->setVisible(recent.wireless_toolbar_show);
+ #endif
+@@ -1626,6 +1627,17 @@ void MainWindow::onFilterSelected(QString filterText, bool prepare)
+         df_combo_box_->applyDisplayFilter();
+ }
+ 
++// Lab Mode sends "" to clear the display filter, which onFilterSelected() would ignore.
++void MainWindow::onLabFilterRequested(QString filter, bool prepare)
++{
++    if (filter.isEmpty()) {
++        df_combo_box_->setDisplayFilter(filter);
++        df_combo_box_->applyDisplayFilter();
++    } else {
++        onFilterSelected(filter, prepare);
++    }
++}
++
+ void MainWindow::onFilterPreferences()
+ {
+     emit showPreferencesDialog(PrefsModel::typeToString(PrefsModel::FilterButtons));
+@@ -2276,6 +2288,7 @@ void MainWindow::showHideMainWidgets(QAction *action)
+     } else if (widget == main_ui_->displayFilterToolBar) {
+         recent.filter_toolbar_show = show;
+         main_ui_->actionViewFilterToolbar->setChecked(show);
++        lab_toolbar_->setVisible(show);
+ #if defined(HAVE_LIBNL) && defined(HAVE_NL80211)
+     } else if (widget == main_ui_->wirelessToolBar) {
+         recent.wireless_toolbar_show = show;
