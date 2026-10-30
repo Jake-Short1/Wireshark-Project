@@ -327,6 +327,7 @@ void MainWindow::layoutToolbars()
 
     main_ui_->mainToolBar->setVisible(recent.main_toolbar_show);
     main_ui_->displayFilterToolBar->setVisible(recent.filter_toolbar_show);
+    lab_toolbar_->setVisible(recent.filter_toolbar_show);  // Lab Mode follows the filter toolbar
 #if defined(HAVE_LIBNL) && defined(HAVE_NL80211)
     main_ui_->wirelessToolBar->setVisible(recent.wireless_toolbar_show);
 #endif
@@ -1626,6 +1627,17 @@ void MainWindow::onFilterSelected(QString filterText, bool prepare)
         df_combo_box_->applyDisplayFilter();
 }
 
+// Lab Mode sends "" to clear the display filter, which onFilterSelected() would ignore.
+void MainWindow::onLabFilterRequested(QString filter, bool prepare)
+{
+    if (filter.isEmpty()) {
+        df_combo_box_->setDisplayFilter(filter);
+        df_combo_box_->applyDisplayFilter();
+    } else {
+        onFilterSelected(filter, prepare);
+    }
+}
+
 void MainWindow::onFilterPreferences()
 {
     emit showPreferencesDialog(PrefsModel::typeToString(PrefsModel::FilterButtons));
@@ -2276,6 +2288,7 @@ void MainWindow::showHideMainWidgets(QAction *action)
     } else if (widget == main_ui_->displayFilterToolBar) {
         recent.filter_toolbar_show = show;
         main_ui_->actionViewFilterToolbar->setChecked(show);
+        lab_toolbar_->setVisible(show);
 #if defined(HAVE_LIBNL) && defined(HAVE_NL80211)
     } else if (widget == main_ui_->wirelessToolBar) {
         recent.wireless_toolbar_show = show;

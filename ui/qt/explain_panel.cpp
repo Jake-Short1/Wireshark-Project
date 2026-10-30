@@ -1,0 +1,112 @@
+/* explain_panel.cpp - Lab Mode Explain panel (see explain_panel.h).
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+#include "explain_panel.h"
+#include "lab_profiles.h"
+#include "capture_file.h"   // before the epan headers: brings in config.h and glib.h, which they need
+#include <epan/epan_dissect.h>
+#include <epan/proto.h>
+#include <QLabel>
+
+// Display text of the first (outermost) occurrence of a field, or "" if the packet lacks it.
+// Searches the whole tree; proto_get_finfo_ptr_array() only sees fields a filter or tap asked for.
+static QString f(epan_dissect_t *edt, const char *abbrev)
+{
+    GPtrArray *found = proto_find_first_finfo(edt->tree, proto_registrar_get_id_byname(abbrev));
+    QString text;
+    if (found->len > 0) {
+        field_info *fi = (field_info *) g_ptr_array_index(found, 0);
+        gchar *s = fvalue_to_string_repr(NULL, &fi->value, FTREPR_DISPLAY, fi->hfinfo->display);
+        text = QString::fromUtf8(s);
+        wmem_free(NULL, s);
+    }
+    g_ptr_array_free(found, TRUE);
+    return text;
+}
+
+// Bold first line, e.g. "TCP from 10.9.0.5:40000 to 10.9.0.6:23"; just "TCP" if the addresses are missing.
+static QString title(epan_dissect_t *edt, const char *proto, const char *src, const char *dst,
+                     const char *sport = NULL, const char *dport = NULL)
+{
+    QString from = f(edt, src), to = f(edt, dst);
+    if (from.isEmpty() || to.isEmpty())
+        return proto;
+    if (sport) {
+        from += ":" + f(edt, sport);
+        to += ":" + f(edt, dport);
+    }
+    return QString("%1 from %2 to %3").arg(proto, from, to);
+}
+
+// Sets *head and returns the explanation; the first matching rule wins. ARP and ICMP are checked
+// first because ICMP errors quote the TCP/UDP header of the packet that caused them.
+static QString explain(epan_dissect_t *edt, QString *head)
+{
+    QString arp = f(edt, "arp.opcode"), icmp = f(edt, "icmp.type"), seq = f(edt, "tcp.seq_raw"), ack = f(edt, "tcp.ack_raw");
+    *head = title(edt, "Packet", "ip.src", "ip.dst");   // replaced below for the protocols we explain
+    if (!arp.isEmpty()) {
+        *head = title(edt, "ARP", "arp.src.proto_ipv4", "arp.dst.proto_ipv4");
+        if (arp == "1") return QString("ARP request: %1 asks who owns %2.").arg(f(edt, "arp.src.proto_ipv4"), f(edt, "arp.dst.proto_ipv4"));
+        return QString("ARP reply: %1 is at %2. A reply nobody asked for can poison other hosts' ARP caches.").arg(f(edt, "arp.src.proto_ipv4"), f(edt, "arp.src.hw_mac"));
+    } else if (!icmp.isEmpty()) {
+        *head = title(edt, "ICMP", "ip.src", "ip.dst");
+        if (icmp == "8" || icmp == "0") return icmp == "8" ? "Echo request (ping): asks the destination to answer." : "Echo reply: the answer to a ping.";
+        if (icmp == "5") return QString("ICMP redirect: the router tells the host to send traffic to %1 instead. The ICMP redirect attack abuses this.").arg(f(edt, "icmp.redir_gw"));
+        if (icmp == "3") return "Destination unreachable: the packet could not be delivered.";
+    } else if (!seq.isEmpty()) {
+        uint len = f(edt, "tcp.len").toUInt();
+        *head = title(edt, "TCP", "ip.src", "ip.dst", "tcp.srcport", "tcp.dstport");
+        // Boolean flags display as "1" (set) or "0".
+        if (f(edt, "tcp.flags.reset") == "1") return "RST: one side is abruptly closing the connection. In the TCP reset lab, this is the forged packet that kills a session.";
+        if (f(edt, "tcp.flags.syn") == "1" && f(edt, "tcp.flags.ack") == "0") return QString("SYN: the client asks to open a connection (step 1 of the three-way handshake). Initial sequence number: %1.").arg(seq);
+        if (f(edt, "tcp.flags.syn") == "1") return QString("SYN-ACK: the server accepts the connection (step 2). It acknowledges %1.").arg(ack);
+        if (f(edt, "tcp.flags.fin") == "1") return "FIN: this side is closing the connection normally.";
+        if (len > 0)    // unsigned arithmetic wraps around exactly like TCP sequence numbers
+            return QString("Data segment carrying %1 bytes. The receiver next expects sequence number %2 (seq + length); a session-hijacking attacker must forge exactly this number.").arg(len).arg(seq.toUInt() + len);
+        if (!ack.isEmpty()) return QString("ACK: confirms receipt of data up to %1.").arg(ack);
+    } else if (!f(edt, "dns.id").isEmpty()) {
+        QString name = f(edt, "dns.qry.name").isEmpty() ? QString("a name") : f(edt, "dns.qry.name");
+        *head = title(edt, "DNS", "ip.src", "ip.dst", "udp.srcport", "udp.dstport");
+        if (f(edt, "dns.flags.response") == "0") return QString("DNS query for %1 (transaction ID %2).").arg(name, f(edt, "dns.id"));
+        return QString("DNS response for %1, transaction ID %2. The ID must match the query; a spoofing attacker has to guess or sniff it.").arg(name, f(edt, "dns.id"));
+    }
+    return "No explanation is available for this kind of packet in this lab.";
+}
+
+ExplainPanel::ExplainPanel(CaptureFile *cf, QWidget *parent) :
+    QDockWidget(tr("Explain This Packet"), parent),
+    cap_file_(cf),
+    text_(new QLabel(this)),
+    lab_(LAB_OFF)
+{
+    text_->setWordWrap(true);
+    text_->setAlignment(Qt::AlignTop | Qt::AlignLeft);
+    setWidget(text_);
+    hide();     // Lab Mode starts Off
+    // Closing a file emits no framesSelected(), so also refresh on file events such as Closed.
+    connect(cf, &CaptureFile::captureEvent, this, [this]() { framesSelected(QList<int>()); });
+    framesSelected(QList<int>());
+}
+
+// Rebuilds the text. Callers without rows pass none (edt decides); a multi-select arrives before edt is dropped.
+void ExplainPanel::framesSelected(QList<int> rows)
+{
+    capture_file *cf = cap_file_->capFile();
+    QString html = tr("Select one packet to see an explanation.");
+    if (rows.size() <= 1 && cf && cf->edt) {
+        QString head, body = explain(cf->edt, &head);
+        // Escape packet values (e.g. DNS names) so they cannot inject markup into the rich text.
+        html = QString("<b>%1</b><br>%2").arg(head.toHtmlEscaped(), body.toHtmlEscaped());
+    }
+    text_->setText(QString("%1<br><br><i>%2</i>").arg(html, QString(lab_profiles[lab_].hint).toHtmlEscaped()));
+}
+
+void ExplainPanel::setLab(int lab_id)
+{
+    if (lab_id < 0 || lab_id >= LAB_COUNT)
+        return;
+    lab_ = lab_id;
+    setVisible(lab_ != LAB_OFF);    // the panel is part of Lab Mode: shown only while a lab is active
+    framesSelected(QList<int>());
+}

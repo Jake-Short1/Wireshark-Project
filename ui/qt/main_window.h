@@ -74,6 +74,7 @@
 #include <ui/qt/widgets/display_filter_combo.h>
 #include "filter_action.h"
 #include "follow_stream_dialog.h"
+#include "lab_toolbar.h"
 #include <ui/qt/models/pref_models.h>
 
 class AccordionFrame;
@@ -203,6 +204,7 @@ private:
     QMap<QAction *, ts_type> td_actions;
     QMap<QAction *, ts_precision> tp_actions;
     FilterExpressionToolBar *filter_expression_toolbar_;
+    LabToolBar *lab_toolbar_;
     bool was_maximized_;
 
     /* the following values are maintained so that the capture file name and status
@@ -405,6 +407,7 @@ private slots:
     void onFilterSelected(QString, bool);
     void onFilterPreferences();
     void onFilterEdit(int uatIndex);
+    void onLabFilterRequested(QString filter, bool prepare);
 
     // Handle FilterAction signals
     void queuedFilterAction(QString filter, FilterAction::Action action, FilterAction::ActionType type);

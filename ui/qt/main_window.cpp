@@ -64,6 +64,9 @@ DIAG_ON(frame-larger-than=)
 #include "wireless_frame.h"
 #include <ui/qt/widgets/wireless_timeline.h>
 #include "wireshark_application.h"
+// ---- Lab Mode: Module 4 begin ----
+#include "explain_panel.h"
+// ---- Lab Mode: Module 4 end ----
 
 #include <ui/qt/widgets/additional_toolbar.h>
 #include <ui/qt/widgets/display_filter_edit.h>
@@ -401,6 +404,14 @@ MainWindow::MainWindow(QWidget *parent) :
 
     main_ui_->displayFilterToolBar->addWidget(filter_expression_toolbar_);
 
+    lab_toolbar_ = new LabToolBar(this);
+    lab_toolbar_->setMovable(false);
+    addToolBar(Qt::TopToolBarArea, lab_toolbar_);
+    insertToolBarBreak(lab_toolbar_);  // own row, below the display filter toolbar
+    connect(lab_toolbar_, SIGNAL(filterRequested(QString,bool)), this, SLOT(onLabFilterRequested(QString,bool)));
+    // Lab Mode integration point: teammates connect to lab_toolbar_ here, e.g.
+    // connect(lab_toolbar_, &LabToolBar::labChanged, <their object>, &<Class>::<slot>);
+
 #if defined(HAVE_LIBNL) && defined(HAVE_NL80211)
     connect(wireless_frame_, SIGNAL(showWirelessPreferences(QString)),
             this, SLOT(showPreferencesDialog(QString)));
@@ -534,6 +545,13 @@ MainWindow::MainWindow(QWidget *parent) :
     connect(wsApp, SIGNAL(reloadLuaPlugins()),
             this, SLOT(reloadLuaPlugins()));
 
+    // ---- Lab Mode: Module 4 begin ----
+    ExplainPanel *explain = new ExplainPanel(&capture_file_, this);   // Qt owns it via the parent
+    addDockWidget(Qt::BottomDockWidgetArea, explain);
+    main_ui_->menuView->addAction(explain->toggleViewAction());
+    connect(packet_list_, SIGNAL(framesSelected(QList<int>)), explain, SLOT(framesSelected(QList<int>)));
+    connect(lab_toolbar_, SIGNAL(labChanged(int)), explain, SLOT(setLab(int)));
+    // ---- Lab Mode: Module 4 end ----
     connect(main_ui_->mainStack, SIGNAL(currentChanged(int)),
             this, SLOT(mainStackChanged(int)));
 
