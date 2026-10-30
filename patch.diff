@@ -1,0 +1,813 @@
+diff --git a/ui/qt/CMakeLists.txt b/ui/qt/CMakeLists.txt
+index 20f4680..31add93 100644
+--- a/ui/qt/CMakeLists.txt
++++ b/ui/qt/CMakeLists.txt
+@@ -127,6 +127,7 @@ set(WIRESHARK_QT_HEADERS
+ 	capture_interfaces_dialog.h
+ 	capture_preferences_frame.h
+ 	coloring_rules_dialog.h
++	lab_style.h
+ 	column_preferences_frame.h
+ 	column_editor_frame.h
+ 	compiled_filter_output.h
+@@ -166,6 +167,7 @@ set(WIRESHARK_QT_HEADERS
+ 	interface_toolbar_reader.h
+ 	interface_frame.h
+ 	io_graph_dialog.h
++	lab_toolbar.h
+ 	layout_preferences_frame.h
+ 	lbm_lbtrm_transport_dialog.h
+ 	lbm_lbtru_transport_dialog.h
+@@ -175,6 +177,7 @@ set(WIRESHARK_QT_HEADERS
+ 	lte_rlc_statistics_dialog.h
+ 	main_status_bar.h
+ 	welcome_page.h
++	explain_panel.h
+ 	main_window.h
+ 	main_window_preferences_frame.h
+ 	manage_interfaces_dialog.h
+@@ -193,6 +196,7 @@ set(WIRESHARK_QT_HEADERS
+ 	profile_dialog.h
+ 	progress_frame.h
+ 	proto_tree.h
++	field_copy_panel.h
+ 	protocol_hierarchy_dialog.h
+ 	protocol_preferences_menu.h
+ 	recent_file_status.h
+@@ -352,6 +356,7 @@ set(WIRESHARK_QT_SRC
+ 	capture_interfaces_dialog.cpp
+ 	capture_preferences_frame.cpp
+ 	coloring_rules_dialog.cpp
++	lab_style.cpp
+ 	column_preferences_frame.cpp
+ 	column_editor_frame.cpp
+ 	compiled_filter_output.cpp
+@@ -386,6 +391,7 @@ set(WIRESHARK_QT_SRC
+ 	interface_frame.cpp
+ 	interface_toolbar.cpp
+ 	interface_toolbar_reader.cpp
++	lab_toolbar.cpp
+ 	layout_preferences_frame.cpp
+ 	lbm_lbtrm_transport_dialog.cpp
+ 	lbm_lbtru_transport_dialog.cpp
+@@ -395,6 +401,7 @@ set(WIRESHARK_QT_SRC
+ 	lte_rlc_statistics_dialog.cpp
+ 	main_status_bar.cpp
+ 	welcome_page.cpp
++	explain_panel.cpp
+ 	main.cpp
+ 	main_window.cpp
+ 	main_window_preferences_frame.cpp
+@@ -414,6 +421,7 @@ set(WIRESHARK_QT_SRC
+ 	profile_dialog.cpp
+ 	progress_frame.cpp
+ 	proto_tree.cpp
++	field_copy_panel.cpp
+ 	protocol_hierarchy_dialog.cpp
+ 	protocol_preferences_menu.cpp
+ 	recent_file_status.cpp
+diff --git a/ui/qt/explain_panel.cpp b/ui/qt/explain_panel.cpp
+new file mode 100755
+index 0000000..e5e4a07
+--- /dev/null
++++ b/ui/qt/explain_panel.cpp
+@@ -0,0 +1,112 @@
++/* explain_panel.cpp - Lab Mode Explain panel (see explain_panel.h).
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#include "explain_panel.h"
++#include "lab_profiles.h"
++#include "capture_file.h"   // before the epan headers: brings in config.h and glib.h, which they need
++#include <epan/epan_dissect.h>
++#include <epan/proto.h>
++#include <QLabel>
++
++// Display text of the first (outermost) occurrence of a field, or "" if the packet lacks it.
++// Searches the whole tree; proto_get_finfo_ptr_array() only sees fields a filter or tap asked for.
++static QString f(epan_dissect_t *edt, const char *abbrev)
++{
++    GPtrArray *found = proto_find_first_finfo(edt->tree, proto_registrar_get_id_byname(abbrev));
++    QString text;
++    if (found->len > 0) {
++        field_info *fi = (field_info *) g_ptr_array_index(found, 0);
++        gchar *s = fvalue_to_string_repr(NULL, &fi->value, FTREPR_DISPLAY, fi->hfinfo->display);
++        text = QString::fromUtf8(s);
++        wmem_free(NULL, s);
++    }
++    g_ptr_array_free(found, TRUE);
++    return text;
++}
++
++// Bold first line, e.g. "TCP from 10.9.0.5:40000 to 10.9.0.6:23"; just "TCP" if the addresses are missing.
++static QString title(epan_dissect_t *edt, const char *proto, const char *src, const char *dst,
++                     const char *sport = NULL, const char *dport = NULL)
++{
++    QString from = f(edt, src), to = f(edt, dst);
++    if (from.isEmpty() || to.isEmpty())
++        return proto;
++    if (sport) {
++        from += ":" + f(edt, sport);
++        to += ":" + f(edt, dport);
++    }
++    return QString("%1 from %2 to %3").arg(proto, from, to);
++}
++
++// Sets *head and returns the explanation; the first matching rule wins. ARP and ICMP are checked
++// first because ICMP errors quote the TCP/UDP header of the packet that caused them.
++static QString explain(epan_dissect_t *edt, QString *head)
++{
++    QString arp = f(edt, "arp.opcode"), icmp = f(edt, "icmp.type"), seq = f(edt, "tcp.seq_raw"), ack = f(edt, "tcp.ack_raw");
++    *head = title(edt, "Packet", "ip.src", "ip.dst");   // replaced below for the protocols we explain
++    if (!arp.isEmpty()) {
++        *head = title(edt, "ARP", "arp.src.proto_ipv4", "arp.dst.proto_ipv4");
++        if (arp == "1") return QString("ARP request: %1 asks who owns %2.").arg(f(edt, "arp.src.proto_ipv4"), f(edt, "arp.dst.proto_ipv4"));
++        return QString("ARP reply: %1 is at %2. A reply nobody asked for can poison other hosts' ARP caches.").arg(f(edt, "arp.src.proto_ipv4"), f(edt, "arp.src.hw_mac"));
++    } else if (!icmp.isEmpty()) {
++        *head = title(edt, "ICMP", "ip.src", "ip.dst");
++        if (icmp == "8" || icmp == "0") return icmp == "8" ? "Echo request (ping): asks the destination to answer." : "Echo reply: the answer to a ping.";
++        if (icmp == "5") return QString("ICMP redirect: the router tells the host to send traffic to %1 instead. The ICMP redirect attack abuses this.").arg(f(edt, "icmp.redir_gw"));
++        if (icmp == "3") return "Destination unreachable: the packet could not be delivered.";
++    } else if (!seq.isEmpty()) {
++        uint len = f(edt, "tcp.len").toUInt();
++        *head = title(edt, "TCP", "ip.src", "ip.dst", "tcp.srcport", "tcp.dstport");
++        // Boolean flags display as "1" (set) or "0".
++        if (f(edt, "tcp.flags.reset") == "1") return "RST: one side is abruptly closing the connection. In the TCP reset lab, this is the forged packet that kills a session.";
++        if (f(edt, "tcp.flags.syn") == "1" && f(edt, "tcp.flags.ack") == "0") return QString("SYN: the client asks to open a connection (step 1 of the three-way handshake). Initial sequence number: %1.").arg(seq);
++        if (f(edt, "tcp.flags.syn") == "1") return QString("SYN-ACK: the server accepts the connection (step 2). It acknowledges %1.").arg(ack);
++        if (f(edt, "tcp.flags.fin") == "1") return "FIN: this side is closing the connection normally.";
++        if (len > 0)    // unsigned arithmetic wraps around exactly like TCP sequence numbers
++            return QString("Data segment carrying %1 bytes. The receiver next expects sequence number %2 (seq + length); a session-hijacking attacker must forge exactly this number.").arg(len).arg(seq.toUInt() + len);
++        if (!ack.isEmpty()) return QString("ACK: confirms receipt of data up to %1.").arg(ack);
++    } else if (!f(edt, "dns.id").isEmpty()) {
++        QString name = f(edt, "dns.qry.name").isEmpty() ? QString("a name") : f(edt, "dns.qry.name");
++        *head = title(edt, "DNS", "ip.src", "ip.dst", "udp.srcport", "udp.dstport");
++        if (f(edt, "dns.flags.response") == "0") return QString("DNS query for %1 (transaction ID %2).").arg(name, f(edt, "dns.id"));
++        return QString("DNS response for %1, transaction ID %2. The ID must match the query; a spoofing attacker has to guess or sniff it.").arg(name, f(edt, "dns.id"));
++    }
++    return "No explanation is available for this kind of packet in this lab.";
++}
++
++ExplainPanel::ExplainPanel(CaptureFile *cf, QWidget *parent) :
++    QDockWidget(tr("Explain This Packet"), parent),
++    cap_file_(cf),
++    text_(new QLabel(this)),
++    lab_(LAB_OFF)
++{
++    text_->setWordWrap(true);
++    text_->setAlignment(Qt::AlignTop | Qt::AlignLeft);
++    setWidget(text_);
++    hide();     // Lab Mode starts Off
++    // Closing a file emits no framesSelected(), so also refresh on file events such as Closed.
++    connect(cf, &CaptureFile::captureEvent, this, [this]() { framesSelected(QList<int>()); });
++    framesSelected(QList<int>());
++}
++
++// Rebuilds the text. Callers without rows pass none (edt decides); a multi-select arrives before edt is dropped.
++void ExplainPanel::framesSelected(QList<int> rows)
++{
++    capture_file *cf = cap_file_->capFile();
++    QString html = tr("Select one packet to see an explanation.");
++    if (rows.size() <= 1 && cf && cf->edt) {
++        QString head, body = explain(cf->edt, &head);
++        // Escape packet values (e.g. DNS names) so they cannot inject markup into the rich text.
++        html = QString("<b>%1</b><br>%2").arg(head.toHtmlEscaped(), body.toHtmlEscaped());
++    }
++    text_->setText(QString("%1<br><br><i>%2</i>").arg(html, QString(lab_profiles[lab_].hint).toHtmlEscaped()));
++}
++
++void ExplainPanel::setLab(int lab_id)
++{
++    if (lab_id < 0 || lab_id >= LAB_COUNT)
++        return;
++    lab_ = lab_id;
++    setVisible(lab_ != LAB_OFF);    // the panel is part of Lab Mode: shown only while a lab is active
++    framesSelected(QList<int>());
++}
+diff --git a/ui/qt/explain_panel.h b/ui/qt/explain_panel.h
+new file mode 100755
+index 0000000..e3e8666
+--- /dev/null
++++ b/ui/qt/explain_panel.h
+@@ -0,0 +1,27 @@
++/* explain_panel.h - Lab Mode: dock that explains the selected packet in plain English.
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#ifndef EXPLAIN_PANEL_H
++#define EXPLAIN_PANEL_H
++
++#include <QDockWidget>
++
++class CaptureFile;
++class QLabel;
++
++class ExplainPanel : public QDockWidget
++{
++    Q_OBJECT
++public:
++    ExplainPanel(CaptureFile *cf, QWidget *parent);    // parent = main window
++public slots:
++    void framesSelected(QList<int> rows);               // connected to PacketList::framesSelected
++    void setLab(int lab_id);                            // connected to LabToolBar::labChanged
++private:
++    CaptureFile *cap_file_;
++    QLabel *text_;
++    int lab_;                   // current LabId
++};
++
++#endif // EXPLAIN_PANEL_H
+diff --git a/ui/qt/field_copy_panel.cpp b/ui/qt/field_copy_panel.cpp
+new file mode 100755
+index 0000000..c7522ee
+--- /dev/null
++++ b/ui/qt/field_copy_panel.cpp
+@@ -0,0 +1,113 @@
++/* field_copy_panel.cpp - Lab Mode Field Copy panel (see field_copy_panel.h).
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#include "field_copy_panel.h"
++
++#include <epan/epan_dissect.h>
++#include <epan/proto.h>
++#include "capture_file.h"
++
++#include <QApplication>
++#include <QClipboard>
++#include <QFontDatabase>
++#include <QGridLayout>
++#include <QLabel>
++#include <QPointer>
++#include <QPushButton>
++#include <QScrollArea>
++#include <QTimer>
++
++// Values students type into attack scripts, in display order. TCP seq/ack are raw, not relative.
++struct FieldSpec { const char *label; const char *abbrev; };
++static const FieldSpec field_specs[] = {
++    { "Source MAC", "eth.src" },             { "Destination MAC", "eth.dst" },
++    { "Source IP", "ip.src" },               { "Destination IP", "ip.dst" },
++    { "IP ID", "ip.id" },                    { "IP TTL", "ip.ttl" },
++    { "TCP source port", "tcp.srcport" },    { "TCP destination port", "tcp.dstport" },
++    { "TCP seq (raw)", "tcp.seq_raw" },      { "TCP ack (raw)", "tcp.ack_raw" },
++    { "TCP payload length", "tcp.len" },     { "TCP flags", "tcp.flags.str" },  { "TCP window", "tcp.window_size_value" },
++    { "UDP source port", "udp.srcport" },    { "UDP destination port", "udp.dstport" },
++    { "ICMP type", "icmp.type" },            { "ICMP code", "icmp.code" },      { "ICMP gateway", "icmp.redir_gw" },
++    { "ARP opcode", "arp.opcode" },          { "ARP sender MAC", "arp.src.hw_mac" },  { "ARP sender IP", "arp.src.proto_ipv4" },
++    { "ARP target MAC", "arp.dst.hw_mac" },  { "ARP target IP", "arp.dst.proto_ipv4" },
++    { "DNS transaction ID", "dns.id" },      { "DNS query name", "dns.qry.name" },
++};
++
++// Display text of the first (outermost) occurrence of a field, or "" if the packet lacks it.
++static QString fieldText(epan_dissect_t *edt, const char *abbrev)
++{
++    // Search the whole tree; proto_get_finfo_ptr_array() only sees fields a filter or tap asked for.
++    GPtrArray *found = proto_find_first_finfo(edt->tree, proto_registrar_get_id_byname(abbrev));
++    QString text;
++    if (found->len > 0) {
++        field_info *fi = (field_info *) g_ptr_array_index(found, 0);
++        gchar *s = fvalue_to_string_repr(NULL, &fi->value, FTREPR_DISPLAY, fi->hfinfo->display);
++        text = QString::fromUtf8(s);
++        wmem_free(NULL, s);
++    }
++    g_ptr_array_free(found, TRUE);
++    return text;
++}
++
++// A button that copies text to the clipboard and says "Copied!" for one second.
++static QPushButton *copyButton(const QString &text)
++{
++    // A QPointer becomes NULL if the rows are rebuilt (deleting the button) before the timer fires.
++    QPointer<QPushButton> button = new QPushButton(FieldCopyPanel::tr("Copy"));
++    QObject::connect(button, &QPushButton::clicked, [button, text]() {
++        QApplication::clipboard()->setText(text);
++        button->setText(FieldCopyPanel::tr("Copied!"));
++        QTimer::singleShot(1000, [button]() {
++            if (button)
++                button->setText(FieldCopyPanel::tr("Copy"));
++        });
++    });
++    return button;
++}
++
++FieldCopyPanel::FieldCopyPanel(CaptureFile *cf, QWidget *parent) :
++    QDockWidget(tr("Lab Fields (Copy)"), parent),
++    cap_file_(cf),
++    scroll_area_(new QScrollArea(this))
++{
++    scroll_area_->setWidgetResizable(true);
++    scroll_area_->setMinimumWidth(fontMetrics().averageCharWidth() * 60);   // room for label, value and button
++    setWidget(scroll_area_);
++    framesSelected(QList<int>());   // start with the hint
++    // Closing a file does not emit framesSelected(), so show the hint again here.
++    connect(cf, &CaptureFile::captureEvent, this, [this](CaptureEvent e) {
++        if (e.eventType() == CaptureEvent::Closed)
++            framesSelected(QList<int>());
++    });
++}
++
++void FieldCopyPanel::framesSelected(QList<int> rows)
++{
++    // A fresh page each time; QScrollArea::setWidget() deletes the old page and all its rows.
++    QWidget *page = new QWidget;
++    QGridLayout *grid = new QGridLayout(page);
++    capture_file *cf = cap_file_->capFile();
++    int row = 0;
++
++    // A deselect also arrives as one row, so also check that a dissection exists.
++    if (rows.size() == 1 && cf && cf->edt) {
++        for (size_t i = 0; i < G_N_ELEMENTS(field_specs); i++) {
++            QString value = fieldText(cf->edt, field_specs[i].abbrev);
++            if (value.isEmpty())
++                continue;   // show only the fields this packet has
++            QLabel *value_label = new QLabel(value);
++            value_label->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
++            value_label->setTextInteractionFlags(Qt::TextSelectableByMouse);
++            grid->addWidget(new QLabel(field_specs[i].label), row, 0);
++            grid->addWidget(value_label, row, 1);
++            grid->addWidget(copyButton(value), row, 2);
++            row++;
++        }
++    }
++
++    if (row == 0)
++        grid->addWidget(new QLabel(tr("Select one packet to see its key fields.")), row++, 0, 1, 3);
++    grid->setRowStretch(row, 1);    // keep the rows at the top
++    scroll_area_->setWidget(page);
++}
+diff --git a/ui/qt/field_copy_panel.h b/ui/qt/field_copy_panel.h
+new file mode 100755
+index 0000000..ab03fe5
+--- /dev/null
++++ b/ui/qt/field_copy_panel.h
+@@ -0,0 +1,27 @@
++/* field_copy_panel.h - Lab Mode: dock listing the selected packet's key fields, each with a Copy button.
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#ifndef FIELD_COPY_PANEL_H
++#define FIELD_COPY_PANEL_H
++
++#include <QDockWidget>
++
++class CaptureFile;
++class QScrollArea;
++
++class FieldCopyPanel : public QDockWidget
++{
++    Q_OBJECT
++public:
++    FieldCopyPanel(CaptureFile *cf, QWidget *parent);   // parent = main window
++
++public slots:
++    void framesSelected(QList<int> rows);               // connected to PacketList::framesSelected
++
++private:
++    CaptureFile *cap_file_;
++    QScrollArea *scroll_area_;  // shows the current rows; its page is replaced on every selection
++};
++
++#endif // FIELD_COPY_PANEL_H
+diff --git a/ui/qt/lab_profiles.h b/ui/qt/lab_profiles.h
+new file mode 100755
+index 0000000..172863d
+--- /dev/null
++++ b/ui/qt/lab_profiles.h
+@@ -0,0 +1,50 @@
++/* lab_profiles.h - Lab Mode: the course labs and their preset display filters.
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#ifndef LAB_PROFILES_H
++#define LAB_PROFILES_H
++
++enum LabId { LAB_OFF = 0, LAB_TCP, LAB_ARP, LAB_ICMP, LAB_DNS, LAB_TUNNEL, LAB_COUNT };
++
++struct LabPreset  { const char *label; const char *filter; const char *tip; };
++struct LabProfile {
++    LabId        id;
++    const char  *title;        // text shown in the combo box
++    const char  *hint;         // "what to look for"; combo tooltip, later shown by Module 4
++    const char  *base_filter;  // applied when the lab is chosen ("" for LAB_OFF)
++    int          n_presets;
++    LabPreset    presets[5];
++};
++
++// Indexed by LabId. Every filter was checked with dftest from Wireshark 3.2.3.
++static const LabProfile lab_profiles[LAB_COUNT] = {
++    { LAB_OFF, "Off (normal Wireshark)", "Lab Mode is off. Wireshark works as usual.", "", 0, {} },
++    { LAB_TCP, "TCP (reset / hijack)", "Look for SYN, SYN-ACK and RST flags and the raw sequence numbers.", "tcp", 5, {
++        { "SYN only", "tcp.flags.syn == 1 && tcp.flags.ack == 0", "First packet of each new connection." },
++        { "SYN-ACK", "tcp.flags.syn == 1 && tcp.flags.ack == 1", "Server replies that accept a new connection." },
++        { "RST packets", "tcp.flags.reset == 1", "Resets that abort a connection, including forged ones." },
++        { "Telnet (port 23)", "tcp.port == 23", "Telnet sessions, which carry keystrokes in plain text." },
++        { "Retransmissions", "tcp.analysis.retransmission", "Segments sent again, often after a hijack or reset." } } },
++    { LAB_ARP, "ARP (cache poisoning / MITM)", "Watch for ARP replies that map a known IP address to a new MAC address.", "arp", 3, {
++        { "Requests", "arp.opcode == 1", "Broadcast questions: who has this IP address?" },
++        { "Replies", "arp.opcode == 2", "Answers that map an IP address to a MAC address." },
++        { "Duplicate address", "arp.duplicate-address-detected", "Two MAC addresses claim the same IP address." } } },
++    { LAB_ICMP, "ICMP (redirect)", "Look for Redirect messages (type 5) and check which gateway they announce.", "icmp", 4, {
++        { "Echo request", "icmp.type == 8", "Ping requests." },
++        { "Echo reply", "icmp.type == 0", "Ping replies." },
++        { "Redirect", "icmp.type == 5", "Messages telling a host to use a different gateway." },
++        { "Unreachable", "icmp.type == 3", "Errors saying a network, host or port cannot be reached." } } },
++    { LAB_DNS, "DNS (local / remote)", "Match responses to queries by transaction ID and port, and watch for forged NS records.", "dns", 4, {
++        { "Queries", "dns.flags.response == 0", "Questions sent to a DNS server." },
++        { "Responses", "dns.flags.response == 1", "Answers from a DNS server, real or spoofed." },
++        { "NS records", "dns.resp.type == 2", "Records naming the server responsible for a domain." },
++        { "Errors", "dns.flags.rcode != 0", "Responses with an error code, such as NXDOMAIN." } } },
++    { LAB_TUNNEL, "Tunnel / VPN", "Tunnelled traffic is encrypted, so compare the outer hosts and ports with the firewall rules.", "ssh || tls || udp", 4, {
++        { "SSH", "ssh", "SSH sessions, including SSH tunnels." },
++        { "TLS", "tls", "TLS-encrypted traffic, used by many VPNs." },
++        { "ICMP", "icmp", "Pings, for example to test whether a tunnel works." },
++        { "UDP", "udp", "UDP traffic, which carries most VPN tunnels." } } },
++};
++
++#endif // LAB_PROFILES_H
+diff --git a/ui/qt/lab_style.cpp b/ui/qt/lab_style.cpp
+new file mode 100755
+index 0000000..325f3b6
+--- /dev/null
++++ b/ui/qt/lab_style.cpp
+@@ -0,0 +1,101 @@
++/* lab_style.cpp - Lab Mode styling (see lab_style.h).
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#include "lab_style.h"
++#include "lab_profiles.h"
++
++#include "packet_list.h"    // first: brings in config.h and glib.h, which the epan headers need
++#include <epan/color_filters.h>
++#include <epan/column.h>
++#include <epan/prefs.h>
++#include "ui/preference_utils.h"
++#include "ui/simple_dialog.h"
++
++#include <QCoreApplication>
++
++// A rule colors matching packets with temporary color "slot" (View > Colorize Conversation > Color 1-10).
++struct LabColorRule { guint8 slot; const char *filter; };
++struct LabColumn    { const char *title; const char *field; };
++struct LabStyleSpec { LabColorRule rules[4]; LabColumn columns[3]; };   // unused entries stay NULL
++
++// Indexed by LabId. Color 1 (light red) marks each attack's key packet, 8 (yellow) the next most
++// important, 7/6/4 (green/cyan/blue) normal traffic. If rules overlap, the lower slot wins.
++static const LabStyleSpec lab_styles[LAB_COUNT] = {
++    { {}, {} },     // LAB_OFF: normal Wireshark
++    { { { 1, "tcp.flags.reset == 1" }, { 8, "tcp.port == 23 && tcp.len > 0" },
++        { 7, "tcp.flags.syn == 1 && tcp.flags.ack == 0" }, { 6, "tcp.flags.syn == 1 && tcp.flags.ack == 1" } },
++      { { "Seq (raw)", "tcp.seq_raw" }, { "Ack (raw)", "tcp.ack_raw" }, { "Flags", "tcp.flags.str" } } },
++    { { { 1, "arp.duplicate-address-detected" }, { 8, "arp.opcode == 2" }, { 4, "arp.opcode == 1" } },
++      { { "ARP op", "arp.opcode" }, { "Sender MAC", "arp.src.hw_mac" }, { "Sender IP", "arp.src.proto_ipv4" } } },
++    { { { 1, "icmp.type == 5" }, { 8, "icmp.type == 3" }, { 7, "icmp.type == 8" }, { 6, "icmp.type == 0" } },
++      { { "ICMP type", "icmp.type" }, { "ICMP code", "icmp.code" }, { "Gateway", "icmp.redir_gw" } } },
++    { { { 2, "dns.flags.rcode != 0" }, { 8, "dns.flags.response == 1" }, { 4, "dns.flags.response == 0" } },
++      { { "DNS ID", "dns.id" }, { "Query", "dns.qry.name" }, { "Rcode", "dns.flags.rcode" } } },
++    { { { 1, "ssh" }, { 6, "tls" }, { 8, "icmp" } },
++      { { "TCP stream", "tcp.stream" } } },
++};
++
++// Show a color filter error the way MainWindow does, then free the message.
++static void reportColorError(gchar *err_msg)
++{
++    simple_dialog(ESD_TYPE_ERROR, ESD_BTN_OK, "%s", err_msg);
++    g_free(err_msg);
++}
++
++LabStyle::LabStyle(PacketList *pl, QObject *parent) :
++    QObject(parent),
++    packet_list_(pl),
++    lab_(LAB_OFF)
++{
++    // Lab columns live only in memory; take them out again when Wireshark quits.
++    connect(qApp, &QCoreApplication::aboutToQuit, this, [this]() { removeLabColumns(); });
++}
++
++void LabStyle::removeLabColumns()
++{
++    const LabColumn *cols = lab_styles[lab_].columns;
++    GList *node = prefs.col_list;
++    while (node) {
++        GList *next = node->next;   // read it now: removing unlinks this node
++        fmt_data *cfmt = (fmt_data *) node->data;
++        for (int i = 0; i < 3 && cols[i].title; i++) {
++            // Only remove a column with exactly our title and field; the user's columns stay.
++            if (cfmt->fmt == COL_CUSTOM && g_strcmp0(cfmt->title, cols[i].title) == 0
++                    && g_strcmp0(cfmt->custom_fields, cols[i].field) == 0) {
++                column_prefs_remove_link(node);
++                g_list_free_1(node);    // remove_link() unlinks the node but does not free it
++                break;
++            }
++        }
++        node = next;
++    }
++}
++
++void LabStyle::setLab(int lab_id)
++{
++    if (lab_id < 0 || lab_id >= LAB_COUNT)
++        return;
++
++    // 1. Undo the previous lab: clear the temporary colors and remove its columns.
++    gchar *err_msg = NULL;
++    if (!color_filters_reset_tmp(&err_msg))
++        reportColorError(err_msg);
++    removeLabColumns();
++
++    // 2. Apply the new lab. Position 0 inserts each column just before Info.
++    lab_ = lab_id;
++    const LabStyleSpec &style = lab_styles[lab_];
++    for (int i = 0; i < 4 && style.rules[i].filter; i++) {
++        if (!color_filters_set_tmp(style.rules[i].slot, style.rules[i].filter, FALSE, &err_msg))
++            reportColorError(err_msg);
++    }
++    for (int i = 0; i < 3 && style.columns[i].title; i++)
++        column_prefs_add_custom(COL_CUSTOM, style.columns[i].title, style.columns[i].field, 0);
++
++    // No prefs_main_write(): lab columns must never be saved to the user's preferences.
++    // Both calls mark every row as stale, so rows re-dissect themselves (and fill the
++    // new columns) when drawn; no full cf_redissect_packets() is needed.
++    packet_list_->columnsChanged();
++    packet_list_->recolorPackets();
++}
+diff --git a/ui/qt/lab_style.h b/ui/qt/lab_style.h
+new file mode 100755
+index 0000000..cdf1dc9
+--- /dev/null
++++ b/ui/qt/lab_style.h
+@@ -0,0 +1,28 @@
++/* lab_style.h - Lab Mode: lab-specific packet colors and extra packet list columns.
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#ifndef LAB_STYLE_H
++#define LAB_STYLE_H
++
++#include <QObject>
++
++class PacketList;
++
++class LabStyle : public QObject
++{
++    Q_OBJECT
++public:
++    LabStyle(PacketList *pl, QObject *parent);
++
++public slots:
++    void setLab(int lab_id);    // connected to LabToolBar::labChanged
++
++private:
++    void removeLabColumns();    // removes the columns that lab_ added
++
++    PacketList *packet_list_;
++    int lab_;                  // lab whose styling is applied now (LAB_OFF = none)
++};
++
++#endif // LAB_STYLE_H
+diff --git a/ui/qt/lab_toolbar.cpp b/ui/qt/lab_toolbar.cpp
+new file mode 100755
+index 0000000..8216746
+--- /dev/null
++++ b/ui/qt/lab_toolbar.cpp
+@@ -0,0 +1,49 @@
++/* lab_toolbar.cpp - Lab Mode toolbar (see lab_toolbar.h).
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#include "lab_toolbar.h"
++
++#include <QAction>
++#include <QApplication>
++#include <QLabel>
++
++LabToolBar::LabToolBar(QWidget *parent) :
++    QToolBar(parent)
++{
++    addWidget(new QLabel(tr("Lab:")));
++
++    // One entry per lab in LabId order, so the combo index is the LabId.
++    lab_combo_ = new QComboBox(this);
++    for (int i = 0; i < LAB_COUNT; i++) {
++        lab_combo_->addItem(lab_profiles[i].title);
++        lab_combo_->setItemData(i, lab_profiles[i].hint, Qt::ToolTipRole);
++    }
++    addWidget(lab_combo_);
++
++    // activated() fires only for user picks (so startup keeps the filter); SIGNAL() avoids QOverload (C++14).
++    connect(lab_combo_, SIGNAL(activated(int)), this, SLOT(labActivated(int)));
++}
++
++void LabToolBar::labActivated(int index)
++{
++    const LabProfile &lab = lab_profiles[index];
++
++    // Delete the previous lab's buttons; deleting a QAction also removes it from the toolbar.
++    qDeleteAll(preset_actions_);
++    preset_actions_.clear();
++
++    for (int i = 0; i < lab.n_presets; i++) {
++        const LabPreset &preset = lab.presets[i];
++        QAction *action = addAction(preset.label);
++        action->setToolTip(QString("%1\n%2").arg(preset.tip, tr("Shift+click to edit before applying.")));
++        // The lambda copies the preset. Shift+click only prepares the filter, as in Wireshark's filter buttons.
++        connect(action, &QAction::triggered, this, [this, preset]() {
++            emit filterRequested(preset.filter, QApplication::keyboardModifiers() & Qt::ShiftModifier);
++        });
++        preset_actions_ << action;
++    }
++
++    emit filterRequested(lab.base_filter, false);  // "" for LAB_OFF clears the filter
++    emit labChanged(lab.id);
++}
+diff --git a/ui/qt/lab_toolbar.h b/ui/qt/lab_toolbar.h
+new file mode 100755
+index 0000000..bc0fc03
+--- /dev/null
++++ b/ui/qt/lab_toolbar.h
+@@ -0,0 +1,33 @@
++/* lab_toolbar.h - Lab Mode toolbar: pick a course lab, then apply its preset display filters.
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#ifndef LAB_TOOLBAR_H
++#define LAB_TOOLBAR_H
++
++#include "lab_profiles.h"
++
++#include <QComboBox>
++#include <QList>
++#include <QToolBar>
++
++class LabToolBar : public QToolBar
++{
++    Q_OBJECT
++public:
++    explicit LabToolBar(QWidget *parent = 0);
++    LabId currentLab() const { return static_cast<LabId>(lab_combo_->currentIndex()); }
++
++signals:
++    void labChanged(int lab_id);              // emitted on every lab selection, including LAB_OFF
++    void filterRequested(QString filter, bool prepare_only);  // "" means "clear the display filter"
++
++private slots:
++    void labActivated(int index);
++
++private:
++    QComboBox *lab_combo_;
++    QList<QAction *> preset_actions_;  // the current lab's preset buttons
++};
++
++#endif // LAB_TOOLBAR_H
+diff --git a/ui/qt/main_window.cpp b/ui/qt/main_window.cpp
+index adc3af3..cdc8c33 100644
+--- a/ui/qt/main_window.cpp
++++ b/ui/qt/main_window.cpp
+@@ -52,11 +52,17 @@ DIAG_ON(frame-larger-than=)
+ #include "conversation_colorize_action.h"
+ #include "export_dissection_dialog.h"
+ #include "export_object_action.h"
++// ---- Lab Mode: Module 2 begin ----
++#include "field_copy_panel.h"
++// ---- Lab Mode: Module 2 end ----
+ #include "file_set_dialog.h"
+ #include "filter_dialog.h"
+ #include "funnel_statistics.h"
+ #include "import_text_dialog.h"
+ #include "interface_toolbar.h"
++// ---- Lab Mode: Module 3 begin ----
++#include "lab_style.h"
++// ---- Lab Mode: Module 3 end ----
+ #include "packet_list.h"
+ #include "proto_tree.h"
+ #include "simple_dialog.h"
+@@ -64,6 +70,9 @@ DIAG_ON(frame-larger-than=)
+ #include "wireless_frame.h"
+ #include <ui/qt/widgets/wireless_timeline.h>
+ #include "wireshark_application.h"
++// ---- Lab Mode: Module 4 begin ----
++#include "explain_panel.h"
++// ---- Lab Mode: Module 4 end ----
+ 
+ #include <ui/qt/widgets/additional_toolbar.h>
+ #include <ui/qt/widgets/display_filter_edit.h>
+@@ -401,6 +410,14 @@ MainWindow::MainWindow(QWidget *parent) :
+ 
+     main_ui_->displayFilterToolBar->addWidget(filter_expression_toolbar_);
+ 
++    lab_toolbar_ = new LabToolBar(this);
++    lab_toolbar_->setMovable(false);
++    addToolBar(Qt::TopToolBarArea, lab_toolbar_);
++    insertToolBarBreak(lab_toolbar_);  // own row, below the display filter toolbar
++    connect(lab_toolbar_, SIGNAL(filterRequested(QString,bool)), this, SLOT(onLabFilterRequested(QString,bool)));
++    // Lab Mode integration point: teammates connect to lab_toolbar_ here, e.g.
++    // connect(lab_toolbar_, &LabToolBar::labChanged, <their object>, &<Class>::<slot>);
++
+ #if defined(HAVE_LIBNL) && defined(HAVE_NL80211)
+     connect(wireless_frame_, SIGNAL(showWirelessPreferences(QString)),
+             this, SLOT(showPreferencesDialog(QString)));
+@@ -468,6 +485,12 @@ MainWindow::MainWindow(QWidget *parent) :
+             this, SIGNAL(frameSelected(int)));
+     connect(packet_list_, SIGNAL(framesSelected(QList<int>)),
+             this, SLOT(framesSelected(QList<int>)));
++    // ---- Lab Mode: Module 2 begin ----
++    FieldCopyPanel *field_copy_panel = new FieldCopyPanel(&capture_file_, this);  // Qt owns it via the parent
++    addDockWidget(Qt::RightDockWidgetArea, field_copy_panel);
++    connect(packet_list_, SIGNAL(framesSelected(QList<int>)), field_copy_panel, SLOT(framesSelected(QList<int>)));
++    main_ui_->menuView->addAction(field_copy_panel->toggleViewAction());  // reopen after closing
++    // ---- Lab Mode: Module 2 end ----
+     connect(this, SIGNAL(frameSelected(int)),
+             this, SLOT(setMenusForSelectedPacket()));
+ 
+@@ -506,6 +529,10 @@ MainWindow::MainWindow(QWidget *parent) :
+     updateRecentActions();
+     setForCaptureInProgress(false);
+ 
++    // ---- Lab Mode: Module 3 begin ----
++    LabStyle *lab_style = new LabStyle(packet_list_, this);   // Qt owns it via the parent
++    connect(lab_toolbar_, SIGNAL(labChanged(int)), lab_style, SLOT(setLab(int)));
++    // ---- Lab Mode: Module 3 end ----
+     setTabOrder(df_combo_box_->lineEdit(), packet_list_);
+     setTabOrder(packet_list_, proto_tree_);
+ 
+@@ -534,6 +561,13 @@ MainWindow::MainWindow(QWidget *parent) :
+     connect(wsApp, SIGNAL(reloadLuaPlugins()),
+             this, SLOT(reloadLuaPlugins()));
+ 
++    // ---- Lab Mode: Module 4 begin ----
++    ExplainPanel *explain = new ExplainPanel(&capture_file_, this);   // Qt owns it via the parent
++    addDockWidget(Qt::BottomDockWidgetArea, explain);
++    main_ui_->menuView->addAction(explain->toggleViewAction());
++    connect(packet_list_, SIGNAL(framesSelected(QList<int>)), explain, SLOT(framesSelected(QList<int>)));
++    connect(lab_toolbar_, SIGNAL(labChanged(int)), explain, SLOT(setLab(int)));
++    // ---- Lab Mode: Module 4 end ----
+     connect(main_ui_->mainStack, SIGNAL(currentChanged(int)),
+             this, SLOT(mainStackChanged(int)));
+ 
+diff --git a/ui/qt/main_window.h b/ui/qt/main_window.h
+index 8082b83..64f57a3 100644
+--- a/ui/qt/main_window.h
++++ b/ui/qt/main_window.h
+@@ -74,6 +74,7 @@
+ #include <ui/qt/widgets/display_filter_combo.h>
+ #include "filter_action.h"
+ #include "follow_stream_dialog.h"
++#include "lab_toolbar.h"
+ #include <ui/qt/models/pref_models.h>
+ 
+ class AccordionFrame;
+@@ -203,6 +204,7 @@ private:
+     QMap<QAction *, ts_type> td_actions;
+     QMap<QAction *, ts_precision> tp_actions;
+     FilterExpressionToolBar *filter_expression_toolbar_;
++    LabToolBar *lab_toolbar_;
+     bool was_maximized_;
+ 
+     /* the following values are maintained so that the capture file name and status
+@@ -405,6 +407,7 @@ private slots:
+     void onFilterSelected(QString, bool);
+     void onFilterPreferences();
+     void onFilterEdit(int uatIndex);
++    void onLabFilterRequested(QString filter, bool prepare);
+ 
+     // Handle FilterAction signals
+     void queuedFilterAction(QString filter, FilterAction::Action action, FilterAction::ActionType type);
+diff --git a/ui/qt/main_window_slots.cpp b/ui/qt/main_window_slots.cpp
+index c03f60a..de1ed72 100644
+--- a/ui/qt/main_window_slots.cpp
++++ b/ui/qt/main_window_slots.cpp
+@@ -327,6 +327,7 @@ void MainWindow::layoutToolbars()
+ 
+     main_ui_->mainToolBar->setVisible(recent.main_toolbar_show);
+     main_ui_->displayFilterToolBar->setVisible(recent.filter_toolbar_show);
++    lab_toolbar_->setVisible(recent.filter_toolbar_show);  // Lab Mode follows the filter toolbar
+ #if defined(HAVE_LIBNL) && defined(HAVE_NL80211)
+     main_ui_->wirelessToolBar->setVisible(recent.wireless_toolbar_show);
+ #endif
+@@ -1626,6 +1627,17 @@ void MainWindow::onFilterSelected(QString filterText, bool prepare)
+         df_combo_box_->applyDisplayFilter();
+ }
+ 
++// Lab Mode sends "" to clear the display filter, which onFilterSelected() would ignore.
++void MainWindow::onLabFilterRequested(QString filter, bool prepare)
++{
++    if (filter.isEmpty()) {
++        df_combo_box_->setDisplayFilter(filter);
++        df_combo_box_->applyDisplayFilter();
++    } else {
++        onFilterSelected(filter, prepare);
++    }
++}
++
+ void MainWindow::onFilterPreferences()
+ {
+     emit showPreferencesDialog(PrefsModel::typeToString(PrefsModel::FilterButtons));
+@@ -2276,6 +2288,7 @@ void MainWindow::showHideMainWidgets(QAction *action)
+     } else if (widget == main_ui_->displayFilterToolBar) {
+         recent.filter_toolbar_show = show;
+         main_ui_->actionViewFilterToolbar->setChecked(show);
++        lab_toolbar_->setVisible(show);
+ #if defined(HAVE_LIBNL) && defined(HAVE_NL80211)
+     } else if (widget == main_ui_->wirelessToolBar) {
+         recent.wireless_toolbar_show = show;

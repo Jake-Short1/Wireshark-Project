@@ -1,238 +1,218 @@
-# Wireshark Student Upgrade
+# Lab Mode for Wireshark 3.2.3
 
-This is a patch to Wireshark v3.2.3 for Fall 2026 Network Security and Defense at RPI. Our project looks to improve Wireshark's packet information 
-section with a better GUI and copy buttons for a quicker improvement for our labs. 
- 
-For the class, it wouldn't be required to use our version, however we would want to improve on the student experience to make labs quicker to complete
-and to understand, with explanations on what the packets are doing in our own packet information tab. 
+**Lab Mode** is a set of four features added to the Wireshark 3.2.3 Qt interface. Together they make Wireshark easier to use for beginners working through the SEED network-security labs: the TCP reset attack, TCP session hijacking, ARP cache poisoning and man-in-the-middle, the ICMP redirect attack, local and remote DNS attacks, and bypassing firewalls with SSH tunnels or VPNs.
 
-Project by Ben LaPorto, Jake Short, James Tarantino, Raagav Kuraganti
+| Module | Feature | Where it appears |
+|---|---|---|
+| 1 | Lab Selector and Preset Filter Toolbar | A **Lab:** toolbar below the display filter bar |
+| 2 | Field Copy Panel | A **Lab Fields (Copy)** dock on the right |
+| 3 | Lab Styling | Lab-specific packet colors and columns in the packet list |
+| 4 | Explain This Packet | An **Explain This Packet** dock at the bottom |
 
-## Modified files:
-- example.c : example
-- example.c : example
+Modules 2, 3 and 4 each build on Module 1, and all four work together.
 
-General Information
--------------------
+## The patch
 
-Wireshark is a network traffic analyzer, or "sniffer", for Linux, macOS,
-\*BSD and other Unix and Unix-like operating systems and for Windows.
-It uses Qt, a graphical user interface library, and libpcap and npcap as
-packet capture and filtering libraries.
+`patch.diff` is a unified git patch against the official Wireshark tag **v3.2.3**, generated with:
 
-The Wireshark distribution also comes with TShark, which is a
-line-oriented sniffer (similar to Sun's snoop or tcpdump) that uses the
-same dissection, capture-file reading and writing, and packet filtering
-code as Wireshark, and with editcap, which is a program to read capture
-files and write the packets from that capture file, possibly in a
-different capture file format, and with some packets possibly removed
-from the capture.
+```bash
+git diff v3.2.3 > patch.diff
+```
 
-The official home of Wireshark is https://www.wireshark.org.
+It changes **13 files** (9 new, 4 modified) and adds **590 lines of C/C++**, with no deletions. A further 8 lines go into the build script `ui/qt/CMakeLists.txt`.
 
-The latest distribution can be found in the subdirectory https://www.wireshark.org/download
+To apply and build it:
 
+```bash
+git clone --depth 1 --branch v3.2.3 https://github.com/wireshark/wireshark.git
+cd wireshark
+git apply --check patch.diff && git apply patch.diff
+mkdir -p ../ws-build && cd ../ws-build
+cmake ../wireshark && make -j$(nproc)
+./run/wireshark
+```
 
-Installation
-------------
+The patch was built and tested on Ubuntu 20.04 (gcc 9.4, Qt 5.12.8, CMake 3.16), the toolchain of the SEED Labs VM. The build is C++11, as required by Wireshark 3.2.3, and it produces no compiler warnings in any of the new or changed files. `LAB_MODE_SETUP.md` is a step-by-step setup guide with troubleshooting, and each `Lab Mode Module N` folder holds that module's own patch, design notes, test results and screenshots.
 
-The Wireshark project builds and tests regularly on the following platforms:
+## Lines of C/C++ added per module
 
-  - Linux (Ubuntu)
-  - Microsoft Windows
-  - macOS / {Mac} OS X
+| Module | Files | Lines |
+|---|---|---|
+| 1 – Lab Selector and Preset Filter Toolbar | `lab_profiles.h` 50, `lab_toolbar.h` 33, `lab_toolbar.cpp` 49, `main_window.h` 3, `main_window.cpp` 8, `main_window_slots.cpp` 13 | 156 |
+| 2 – Field Copy Panel | `field_copy_panel.h` 27, `field_copy_panel.cpp` 113, `main_window.cpp` 9 | 149 |
+| 3 – Lab Styling | `lab_style.h` 28, `lab_style.cpp` 101, `main_window.cpp` 7 | 136 |
+| 4 – Explain This Packet | `explain_panel.h` 27, `explain_panel.cpp` 112, `main_window.cpp` 10 | 149 |
+| **Total** | | **590** |
 
-Official installation packages are available for Microsoft Windows and
-macOS.
+All files are in `ui/qt/`. In `main_window.cpp`, each module's lines sit between `// ---- Lab Mode: Module N begin ----` and `// ---- Lab Mode: Module N end ----` markers.
 
-It is available as either a standard or add-on package for many popular
-operating sytems and Linux distributions including Debian, Ubuntu, Fedora,
-CentOS, RHEL, Arch, Gentoo, openSUSE, FreeBSD, DragonFly BSD, NetBSD, and
-OpenBSD.
+---
 
-Additionaly it is available through many third-party packaging systems
-such as pkgsrc, OpenCSW, Homebrew, and MacPorts.
+## Module 1 – Lab Selector and Preset Filter Toolbar
 
-It should run on other Unix-ish systems without too much trouble.
+### Feature Title & Description
 
-In some cases the current version of Wireshark might not support your
-operating system. This is the case for Windows XP, which is supported by
-Wireshark 1.10 and earlier. In other cases the standard package for
-Wireshark might simply be old. This is the case for Solaris and HP-UX.
+**Lab Mode: Lab Selector and Preset Filter Toolbar**
 
-NOTE: The Makefile depends on GNU "make"; it doesn't appear to
-work with the "make" that comes with Solaris 7 nor the BSD "make".
+This module adds a **Lab:** toolbar directly below Wireshark's display filter bar. Its drop-down menu lists the course labs:
 
-Both Perl and Python are needed, the former for building the man pages.
+- TCP (reset / hijack)
+- ARP (cache poisoning / MITM)
+- ICMP (redirect)
+- DNS (local / remote)
+- Tunnel / VPN
+- **Off (normal Wireshark)**, the default at startup
 
-If you decide to modify the yacc grammar or lex scanner, then
-you need "flex" - it cannot be built with vanilla "lex" -
-and either "bison" or the Berkeley "yacc". Your flex
-version must be 2.5.1 or greater. Check this with `flex -V`.
+Choosing a lab immediately applies that lab's base display filter (for example `tcp` or `arp`) and shows a row of preset buttons for the packets that matter in that lab. For example, the TCP lab offers *SYN only*, *SYN-ACK*, *RST packets*, *Telnet (port 23)* and *Retransmissions*.
 
-You must therefore install Perl, Python, GNU "make", "flex", and either "bison"
-or Berkeley "yacc" on systems that lack them.
+- Clicking a preset applies its filter: the filter text appears in the filter bar, the bar turns green, and the packet list updates.
+- **Shift+click** only places the filter in the filter bar, so it can be edited before applying it. Wireshark's own filter buttons use the same convention.
+- Hovering over a lab shows a one-sentence hint about what to look for; hovering over a preset explains what it isolates.
+- Choosing **Off** clears the display filter and removes the preset buttons.
+- The toolbar is shown and hidden together with the filter toolbar (*View → Filter Toolbar*).
 
-Full installation instructions can be found in the INSTALL file and in the
-Developer's Guide at https://www.wireshark.org/docs/wsdg_html_chunked/
+**How to trigger it:** open a capture or start a live capture, then pick a lab from the **Lab:** drop-down menu.
 
-See also the appropriate README._OS_ files for OS-specific installation
-instructions.
+### Justification
 
-Usage
------
+Display filters are Wireshark's most powerful tool, but beginners rarely know the field names or the exact syntax. Typing `ssl` instead of `tls`, or `tcp.flags.rst` instead of `tcp.flags.reset`, is a common mistake that costs lab time. Lab Mode turns the filters each lab needs into single clicks, and every filter was validated against Wireshark 3.2.3 with `dftest`. Because the filter text is written into the normal filter bar, students learn the syntax by seeing it, and they can Shift+click a preset to refine it.
 
-In order to capture packets from the network, you need to make the
-dumpcap program set-UID to root or you need to have access to the
-appropriate entry under `/dev` if your system is so inclined (BSD-derived
-systems, and systems such as Solaris and HP-UX that support DLPI,
-typically fall into this category).  Although it might be tempting to
-make the Wireshark and TShark executables setuid root, or to run them as
-root please don't.  The capture process has been isolated in dumpcap;
-this simple program is less likely to contain security holes and is thus
-safer to run as root.
+*Example:* in the TCP reset lab, the student picks *TCP (reset / hijack)* and clicks *RST packets*. The forged reset is then the only packet on screen, ready to compare with the sequence number the victim expects next.
 
-Please consult the man page for a description of each command-line
-option and interface feature.
+Lab Mode is off by default and never changes the user's filter at startup, so experienced users see normal Wireshark. The module also provides what the other three modules build on: the `labChanged` signal and the shared table of labs in `lab_profiles.h`.
 
+### Modified Files List
 
-Multiple File Types
--------------------
+| File | Change | Reason |
+|---|---|---|
+| `ui/qt/lab_profiles.h` | New (50 lines) | A data-only table of the labs: title, hint, base filter and up to five preset filters with tooltips, indexed by `LabId`. Modules 3 and 4 also read it. |
+| `ui/qt/lab_toolbar.h` | New (33 lines) | Declares `LabToolBar`, a `QToolBar` with the signals `labChanged(int)` and `filterRequested(QString, bool)`. |
+| `ui/qt/lab_toolbar.cpp` | New (49 lines) | Builds the "Lab:" label and the lab drop-down menu. On each selection it replaces the preset buttons and emits the signals; each button emits its filter, and Shift+click only prepares it. |
+| `ui/qt/main_window.h` | +3 lines | Includes `lab_toolbar.h` and adds the `lab_toolbar_` member and the `onLabFilterRequested()` slot. |
+| `ui/qt/main_window.cpp` | +8 lines | Creates the toolbar on its own row below the filter bar, connects it, and marks the integration point used by the other modules. |
+| `ui/qt/main_window_slots.cpp` | +13 lines | `onLabFilterRequested()` applies a filter through Wireshark's existing `onFilterSelected()`. It also handles the empty filter (clear), which `onFilterSelected()` ignores. The toolbar's visibility follows the filter toolbar. |
 
-Wireshark can read packets from a number of different file types.  See
-the Wireshark man page or the Wireshark User's Guide for a list of
-supported file formats.
+---
 
-Wireshark can transparently read gzipped versions of any of those files if
-zlib was available when Wireshark was compiled.  CMake will automatically
-use zlib if it is found on your system.  You can disable zlib support by
-running `cmake -DENABLE_ZLIB=OFF`.
+## Module 2 – Field Copy Panel
 
-Although Wireshark can read AIX iptrace files, the documentation on
-AIX's iptrace packet-trace command is sparse.  The `iptrace` command
-starts a daemon which you must kill in order to stop the trace. Through
-experimentation it appears that sending a HUP signal to that iptrace
-daemon causes a graceful shutdown and a complete packet is written
-to the trace file. If a partial packet is saved at the end, Wireshark
-will complain when reading that file, but you will be able to read all
-other packets.  If this occurs, please let the Wireshark developers know
-at wireshark-dev@wireshark.org; be sure to send us a copy of that trace
-file if it's small and contains non-sensitive data.
+### Feature Title & Description
 
-Support for Lucent/Ascend products is limited to the debug trace output
-generated by the MAX and Pipline series of products.  Wireshark can read
-the output of the `wandsession`, `wandisplay`, `wannext`, and `wdd`
-commands.
+**Lab Mode: Field Copy Panel**
 
-Wireshark can also read dump trace output from the Toshiba "Compact Router"
-line of ISDN routers (TR-600 and TR-650). You can telnet to the router
-and start a dump session with `snoop dump`.
+This module adds a dock titled **Lab Fields (Copy)** on the right of the main window. When a packet is selected, it lists the values students most often type into the lab attack scripts:
 
-CoSine L2 debug output can also be read by Wireshark. To get the L2
-debug output first enter the diags mode and then use
-`create-pkt-log-profile` and `apply-pkt-lozg-profile` commands under
-layer-2 category. For more detail how to use these commands, you
-should examine the help command by `layer-2 create ?` or `layer-2 apply ?`.
+- source and destination MAC and IP addresses, IP ID and TTL
+- TCP and UDP ports
+- the **raw** TCP sequence and acknowledgment numbers, TCP payload length, flags and window
+- ICMP type, code and redirect gateway
+- ARP opcode, sender and target
+- DNS transaction ID and query name
 
-To use the Lucent/Ascend, Toshiba and CoSine traces with Wireshark, you must
-capture the trace output to a file on disk.  The trace is happening inside
-the router and the router has no way of saving the trace to a file for you.
-An easy way of doing this under Unix is to run `telnet <ascend> | tee <outfile>`.
-Or, if your system has the "script" command installed, you can save
-a shell session, including telnet, to a file. For example to log to a file
-named tracefile.out:
+Only the fields present in the selected packet are shown. Each value can be selected with the mouse, and the **Copy** button next to it puts the value on the clipboard; the button briefly reads "Copied!". With no packet or several packets selected, or after the file is closed, the panel shows "Select one packet to see its key fields."
 
-~~~
-$ script tracefile.out
-Script started on <date/time>
-$ telnet router
-..... do your trace, then exit from the router's telnet session.
-$ exit
-Script done on <date/time>
-~~~
+**How to trigger it:** open a capture and click any packet. If the panel was closed, reopen it with **View → Lab Fields (Copy)**.
 
+### Justification
 
-Name Resolution
----------------
+The SEED attack scripts need exact values from captured packets: the next sequence number for a TCP reset or hijack, the gateway's MAC address for ARP poisoning, the transaction ID for DNS spoofing. Beginners find these values by expanding several levels of the packet-details tree, and they often copy the wrong one. The most common mistake is Wireshark's default *relative* sequence number (for example 1) instead of the raw number the attack needs. Retyping a ten-digit number by hand adds typos. The panel puts the values in one place, always shows raw TCP numbers, and copies each one with a single click.
 
-Wireshark will attempt to use reverse name resolution capabilities
-when decoding IPv4 and IPv6 packets.
+*Example:* in the TCP session hijacking lab, the student selects the victim's last Telnet packet. The panel shows *TCP seq (raw)* and *TCP ack (raw)*, and two clicks on Copy put the exact numbers into the scapy script.
 
-If you want to turn off name resolution while using Wireshark, start
-Wireshark with the `-n` option to turn off all name resolution (including
-resolution of MAC addresses and TCP/UDP/SMTP port numbers to names) or
-with the `-N mt` option to turn off name resolution for all
-network-layer addresses (IPv4, IPv6, IPX).
+The panel does not depend on the lab selector, so it is useful in every lab and even when Lab Mode is off.
 
-You can make that the default setting by opening the Preferences dialog
-using the Preferences item in the Edit menu, selecting "Name resolution",
-turning off the appropriate name resolution options, and clicking "OK".
+### Modified Files List
 
+| File | Change | Reason |
+|---|---|---|
+| `ui/qt/field_copy_panel.h` | New (27 lines) | Declares `FieldCopyPanel`, a `QDockWidget` with the `framesSelected(QList<int>)` slot. |
+| `ui/qt/field_copy_panel.cpp` | New (113 lines) | The table of fields to show. A helper finds each field in the selected packet's dissection tree (`proto_find_first_finfo`) and formats it as Wireshark displays it. The file also builds the rows with their Copy buttons, shows the hint, and resets the panel when the capture file is closed. |
+| `ui/qt/main_window.cpp` | +9 lines | Includes the header, creates the dock on the right, connects it to `PacketList::framesSelected`, and adds its show/hide action to the View menu. |
 
-SNMP
-----
+---
 
-Wireshark can do some basic decoding of SNMP packets; it can also use
-the libsmi library to do more sophisticated decoding by reading MIB
-files and using the information in those files to display OIDs and
-variable binding values in a friendlier fashion.  CMake  will automatically
-determine whether you have the libsmi library on your system.  If you
-have the libsmi library but _do not_ want Wireshark to use it, you can run
-cmake with the `-DENABLE_SMI=OFF` option.
+## Module 3 – Lab Styling
 
-How to Report a Bug
--------------------
+### Feature Title & Description
 
-Wireshark is under constant development, so it is possible that you will
-encounter a bug while using it. Please report bugs at https://bugs.wireshark.org.
-Be sure you enter into the bug:
+**Lab Mode: Lab Styling**
 
-1. The complete build information from the "About Wireshark"
-   item in the Help menu or the output of `wireshark -v` for
-   Wireshark bugs and the output of `tshark -v` for TShark bugs;
+This module makes the packet list adapt to the lab chosen in the **Lab:** toolbar. When a lab is selected, Wireshark colors the packets that matter for that lab and adds up to three columns with the values the lab needs:
 
-2. If the bug happened on Linux, the Linux distribution you were
-   using, and the version of that distribution;
+| Lab | Colored packets | Extra columns |
+|---|---|---|
+| TCP (reset / hijack) | RST (light red), Telnet data (yellow), SYN (green), SYN-ACK (cyan) | Seq (raw), Ack (raw), Flags |
+| ARP (cache poisoning / MITM) | Replies flagged as a duplicate address, i.e. poisoning (light red); replies (yellow); requests (blue) | ARP op, Sender MAC, Sender IP |
+| ICMP (redirect) | Redirects (light red), unreachable (yellow), echo request (green), echo reply (cyan) | ICMP type, ICMP code, Gateway |
+| DNS (local / remote) | Error responses (pink), responses (yellow), queries (blue) | DNS ID, Query, Rcode |
+| Tunnel / VPN | SSH (light red), TLS (cyan), ICMP (yellow) | TCP stream |
 
-3. The command you used to invoke Wireshark, if you ran
-   Wireshark from the command line, or TShark, if you ran
-   TShark, and the sequence of operations you performed that
-   caused the bug to appear.
+Selecting another lab removes the previous lab's colors and columns before applying the new ones, and **Off** restores the normal look.
+- The colors use Wireshark's temporary *Colorize Conversation* colors, so the user's own coloring rules are never changed.
+- The columns exist only in memory: they are never written to the preferences file, and they are removed when Wireshark quits.
+- Columns the user created themselves are never touched.
 
-If the bug is produced by a particular trace file, please be sure to
-attach to the bug a trace file along with your bug description.  If the
-trace file contains sensitive information (e.g., passwords), then please
-do not send it.
+**How to trigger it:** open a capture or start a live capture, then pick a lab from the **Lab:** drop-down menu.
 
-If Wireshark died on you with a 'segmentation violation', 'bus error',
-'abort', or other error that produces a UNIX core dump file, you can
-help the developers a lot if you have a debugger installed.  A stack
-trace can be obtained by using your debugger ('gdb' in this example),
-the wireshark binary, and the resulting core file.  Here's an example of
-how to use the gdb command 'backtrace' to do so.
+### Justification
 
-~~~
-$ gdb wireshark core
-(gdb) backtrace
-..... prints the stack trace
-(gdb) quit
-$
-~~~
+In a busy capture, the few packets that prove an attack worked are easy to miss among hundreds of ordinary ones. The values that matter, such as a raw sequence number or the MAC address inside an ARP reply, are hidden several levels deep in the packet-details tree. Lab Styling makes the important packets stand out at a glance and puts the important values straight into the packet list. Beginners can then spend their time understanding the attack instead of searching the interface. Because the styling follows the selected lab and is never saved, students cannot accidentally break their normal Wireshark setup.
 
-The core dump file may be named "wireshark.core" rather than "core" on
-some platforms (e.g., BSD systems).  If you got a core dump with
-TShark rather than Wireshark, use "tshark" as the first argument to
-the debugger; the core dump may be named "tshark.core".
+*Example:* in the ARP cache poisoning lab, the student selects **ARP**. The attacker's forged reply turns light red, because Wireshark detects that it claims an IP address already seen with another MAC. Its *Sender MAC* column shows the attacker's MAC address next to the gateway's IP in *Sender IP*, so the poisoning is visible in a single row without opening any packet.
 
-Disclaimer
-----------
+### Modified Files List
 
-There is no warranty, expressed or implied, associated with this product.
-Use at your own risk.
+| File | Change | Reason |
+|---|---|---|
+| `ui/qt/lab_style.h` | New (28 lines) | Declares `LabStyle`, a `QObject` with the `setLab(int)` slot. |
+| `ui/qt/lab_style.cpp` | New (101 lines) | A per-lab table of color rules and columns. `setLab()` first removes the previous lab's temporary colors (`color_filters_reset_tmp`) and its columns, matching both title and field so user columns are kept. It then sets the new lab's rules (`color_filters_set_tmp`), adds its columns before *Info* (`column_prefs_add_custom`), and asks the packet list to refresh. The lab columns are removed again when Wireshark quits. |
+| `ui/qt/main_window.cpp` | +7 lines | Includes the header, creates `LabStyle` (owned by the main window) and connects it to `LabToolBar::labChanged`. |
 
+---
 
-Gerald Combs <gerald@wireshark.org>
+## Module 4 – Explain This Packet
 
-Gilbert Ramirez <gram@alumni.rice.edu>
+### Feature Title & Description
 
-Guy Harris <guy@alum.mit.edu>
+**Lab Mode: Explain This Packet**
+
+This module adds a dock at the bottom of the main window that appears whenever a lab is selected. When a packet is clicked, the dock shows three lines:
+- **A bold heading** with the protocol and endpoints, for example *TCP from 10.9.0.6:23 to 10.9.0.5:40000*.
+- **A plain-English explanation** of what the packet does, quoting its real values.
+- **The selected lab's hint** about what to look for, in italics.
+
+| Packet | Explanation (shortened) |
+|---|---|
+| TCP RST | One side is abruptly closing the connection; in the TCP reset lab, this is the forged packet. |
+| TCP SYN / SYN-ACK | Step 1 / step 2 of the three-way handshake, with the raw initial sequence number or the acknowledged number. |
+| TCP data | The number of bytes and the next sequence number the receiver expects (sequence + length), which a session hijacker must forge. |
+| TCP FIN / ACK | A normal close / an acknowledgment up to the raw acknowledgment number. |
+| ARP request / reply | Which host asks for which IP address / "10.9.0.1 is at 02:42:0a:09:00:69", with a warning that unsolicited replies can poison ARP caches. |
+| ICMP | Echo request and reply, redirect (with the announced gateway), destination unreachable. |
+| DNS | Query or response, with the query name and transaction ID, and why a spoofer must match that ID. |
+
+Other packets get "No explanation is available for this kind of packet in this lab." The dock is hidden while Lab Mode is **Off**. It can be closed with its × button and reopened through **View → Explain This Packet**.
+
+**How to trigger it:** select a lab in the **Lab:** drop-down menu, then click any packet.
+
+### Justification
+
+Beginners can see every byte of a packet in Wireshark and still not know what the packet *means*. The packet-details tree lists flags and numbers, but it does not say "this is the forged reset" or "this is the sequence number your attack script has to use". The Explain panel turns the packet list into a guided walkthrough: each click answers, in one or two sentences with the real values filled in, what the packet does and why it matters for the lab. Along the way it teaches the protocol mechanics the labs depend on: the steps of the TCP handshake, sequence numbers plus payload length, ARP request and reply semantics, and DNS transaction IDs.
+
+*Example:* in the TCP session hijacking lab, the student clicks the victim's last Telnet data packet. The panel reads *"Data segment carrying 4 bytes. The receiver next expects sequence number 1005 (seq + length); a session-hijacking attacker must forge exactly this number."* That is the value the student's attack script needs, already calculated.
+
+### Modified Files List
+
+| File | Change | Reason |
+|---|---|---|
+| `ui/qt/explain_panel.h` | New (27 lines) | Declares `ExplainPanel`, a `QDockWidget` with the `framesSelected(QList<int>)` and `setLab(int)` slots. |
+| `ui/qt/explain_panel.cpp` | New (112 lines) | Reads fields from the selected packet's dissection tree and builds the bold heading from the available addresses and ports. It applies the explanation rules in order (ARP, ICMP, TCP, DNS, then the fallback; the first match wins) and shows the result with the lab hint from `lab_profiles.h`. It shows the dock only while a lab is active and returns to the placeholder text when no single packet is selected or the file is closed. |
+| `ui/qt/main_window.cpp` | +10 lines | Includes the header, creates the dock at the bottom, adds it to the View menu, and connects it to `PacketList::framesSelected` and `LabToolBar::labChanged`. |
+
+---
+
+## Build-script change (not counted as C/C++)
+
+| File | Change | Reason |
+|---|---|---|
+| `ui/qt/CMakeLists.txt` | +8 lines | Adds the new headers to `WIRESHARK_QT_HEADERS` and the new sources to `WIRESHARK_QT_SRC`: `lab_toolbar`, `field_copy_panel`, `lab_style` and `explain_panel`, one header and one source each. `lab_profiles.h` is header-only data and is not listed, like other plain headers in that directory. With CMake's automatic `moc` step, the new `Q_OBJECT` classes are compiled without further changes. |
