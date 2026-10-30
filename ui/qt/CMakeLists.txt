@@ -166,6 +166,7 @@ set(WIRESHARK_QT_HEADERS
 	interface_toolbar_reader.h
 	interface_frame.h
 	io_graph_dialog.h
+	lab_toolbar.h
 	layout_preferences_frame.h
 	lbm_lbtrm_transport_dialog.h
 	lbm_lbtru_transport_dialog.h
@@ -175,6 +176,7 @@ set(WIRESHARK_QT_HEADERS
 	lte_rlc_statistics_dialog.h
 	main_status_bar.h
 	welcome_page.h
+	explain_panel.h
 	main_window.h
 	main_window_preferences_frame.h
 	manage_interfaces_dialog.h
@@ -386,6 +388,7 @@ set(WIRESHARK_QT_SRC
 	interface_frame.cpp
 	interface_toolbar.cpp
 	interface_toolbar_reader.cpp
+	lab_toolbar.cpp
 	layout_preferences_frame.cpp
 	lbm_lbtrm_transport_dialog.cpp
 	lbm_lbtru_transport_dialog.cpp
@@ -395,6 +398,7 @@ set(WIRESHARK_QT_SRC
 	lte_rlc_statistics_dialog.cpp
 	main_status_bar.cpp
 	welcome_page.cpp
+	explain_panel.cpp
 	main.cpp
 	main_window.cpp
 	main_window_preferences_frame.cpp
